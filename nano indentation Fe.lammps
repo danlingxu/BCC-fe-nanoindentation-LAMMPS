@@ -1,0 +1,110 @@
+#initial condition
+dimension                   3   #3D                          
+boundary                    p p p   #periodic boundary condition                              
+units                       metal    
+atom_style                  atomic
+timestep                    0.001 
+
+#define region
+region                      box block 0 60 0 60 -10 120 units box 
+create_box                  2 box   #create box
+
+#define the specimen
+lattice                     bcc 2.866
+region                      boundary      block INF INF INF INF 0   10 units box
+region                      temp_layer    block INF INF INF INF 10  20 units box
+region                      newton_layer  block INF INF INF INF 20  60 units box
+region                      piece union 3 boundary temp_layer newton_layer
+create_atoms                1 region piece 
+
+#define the indenter
+lattice                     diamond 3.57 
+region                      indenter sphere 30 30 90 15 units box 
+create_atoms                2 region indenter 
+
+#atom mass
+mass                        1 56    #Fe
+mass                        2 12    #C
+
+#group
+group                       boundary region boundary
+group                       temp_layer region temp_layer
+group                       newton_layer region newton_layer
+group                       piece region piece
+group                       indenter region indenter
+
+#write data
+write_data                  Fe-C.data
+
+#define potential function
+pair_style                  hybrid eam/fs tersoff morse 2.7
+pair_coeff                  * * eam/fs Fe.eam.fs Fe NULL   
+pair_coeff                  * * tersoff SiC.tersoff NULL C 
+pair_coeff                  1 2 morse 0.7214 1.5938 2.4901
+#minimize engery
+min_style                   cg
+minimize                    1e-10 1e-10 5000 5000
+
+#initial velocity
+velocity                    all create 300 8877423 
+
+#relaxation !!!
+fix                         1 piece npt temp 300 300 0.1 iso 0 0 1 
+thermo                      100
+thermo_style                custom step temp etotal 
+dump                        1 all atom 500 1npt.xyz
+run                         10000
+undump                      1
+unfix                       1
+reset_timestep              0
+
+#change boundary condition???
+change_box                  all boundary p p s  #periodic, periodic, shrink-wrapped
+
+#compute temp in layers
+compute                     new_temp1  temp_layer   temp/com
+compute                     new_temp2 newton_layer  temp/com
+
+#temp output
+thermo                      100
+thermo_style                custom step temp c_new_temp1 c_new_temp2 etotal ke pe 
+dump                        1 all custom 500 2indent.xyz id type x y z
+
+#indentation
+#displacement=step*velocity*time_step
+variable                    depth equal 15    #depth = 20 A
+variable                    distance equal 15 #initial distance = 10 A
+variable                    loadv equal 0.2   #loading speed = 0.2 A/ps
+variable                    load_step   equal (v_depth+v_distance)/v_loadv/0.001
+variable                    unload_step equal (v_depth+v_distance)/v_loadv/0.001/2
+
+#calc displacement
+variable                    dis equal xcm(indenter,z)
+variable                    initial_dis equal ${dis}    
+variable                    disp equal -(v_dis-(${initial_dis}))
+
+#calc load
+compute                     forcez indenter property/atom fz     
+compute                     fzz indenter reduce sum c_forcez  
+variable                    load equal c_fzz
+fix                         def3 all print 100 "${disp} ${load}" file disp_load.txt screen no
+
+#layer fix
+fix                         20 newton_layer nve
+
+#temp fix
+fix                         30 temp_layer nve
+fix                         31 temp_layer langevin 300.0 300.0 0.01 25784
+fix_modify                  31 temp new_temp1
+
+#boundary fix
+velocity                    boundary set 0 0 0 
+fix                         40 boundary setforce 0.0 0.0 0.0  
+
+fix                         50 indenter move linear 0 0 -${loadv} units box 
+run                         ${load_step}
+unfix                       50 
+
+fix                         51 indenter move linear 0 0 ${loadv}  units box 
+run                         ${unload_step}
+unfix                       51
